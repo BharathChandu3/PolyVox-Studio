@@ -14,6 +14,7 @@ const state = {
     analyser: null,
     audioStream: null,
     visualizerAnimationId: null,
+    restartTimeout: null,
     ttsPlaying: false,
     history: [],
     historyIndex: -1,
@@ -307,8 +308,10 @@ function initSpeechRecognition() {
         return;
     }
 
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
     const recognition = new SpeechRecognition();
-    recognition.continuous = true;
+    // On mobile Android Chrome, continuous=true can cause premature disconnects and mic locking
+    recognition.continuous = !isMobile;
     recognition.interimResults = true;
     recognition.lang = state.currentLanguage;
     recognition.maxAlternatives = 1;
@@ -354,19 +357,35 @@ function initSpeechRecognition() {
             stopRecording();
             showToast('Microphone access was denied. Please allow microphone permissions in browser settings.', 'error');
             elements.liveStatusText.textContent = 'Mic Permission Denied';
+        } else if (event.error === 'audio-capture') {
+            stopRecording();
+            showToast('Microphone is busy or locked by another app/tab. Please close other tabs and try again.', 'error');
+            elements.liveStatusText.textContent = 'Microphone Busy';
+        } else if (event.error === 'network') {
+            stopRecording();
+            showToast('Network error with speech recognition service. Please check your connection.', 'error');
+            elements.liveStatusText.textContent = 'Network Error';
         } else if (event.error === 'no-speech') {
             // Handled gracefully in onend
         }
     };
 
     recognition.onend = () => {
-        // If user intended continuous dictation, restart automatically
+        // If user intended continuous dictation, restart automatically with a cooldown
+        // This cooldown allows Android audio hardware and Chrome to cleanly release the mic stream
         if (state.isRecording && elements.toggleContinuous.checked) {
-            try {
-                recognition.start();
-            } catch {
-                // If restarting too fast, stop gracefully
-            }
+            clearTimeout(state.restartTimeout);
+            const cooldown = isMobile ? 450 : 150;
+            state.restartTimeout = setTimeout(() => {
+                if (state.isRecording) {
+                    try {
+                        recognition.start();
+                    } catch (e) {
+                        console.warn('[PolyVox] Restart error:', e);
+                        stopRecording();
+                    }
+                }
+            }, cooldown);
         } else if (state.isRecording) {
             stopRecording();
         }
@@ -399,6 +418,10 @@ function startRecording() {
 }
 
 function stopRecording() {
+    if (state.restartTimeout) {
+        clearTimeout(state.restartTimeout);
+        state.restartTimeout = null;
+    }
     state.isRecording = false;
     document.body.classList.remove('is-recording');
     elements.liveStatusText.textContent = 'Microphone Paused';
